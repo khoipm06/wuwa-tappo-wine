@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# WuWa Tappo — launches WuwaTappoGlobal's WuwaTappo.exe (WebView2 companion app)
+# inside the game's Steam Linux Runtime container via Proton.
+#
+# Three mechanisms (see docs/root-cause.md for the full evidence chain):
+#   1. WebView2 Chromium flags — stop the DComp/GPU crash-loop inside the
+#      pressure-vessel container (WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS).
+#   2. SetWindowPos nudge sidecars — on Wine, Chromium ignores 1px window-bounds
+#      deltas, so the surface created at launch is never re-created and the
+#      first frame is never presented (white/blank windows). webview2_render_fix.py
+#      nudges the main window; tappo_sidecar.py nudges EVERY Tauri window
+#      (update dialog, About, Toast appear later) for 8 minutes.
+#   3. sticky_daemon.py — host-side, sets EWMH _NET_WM_DESKTOP=0xFFFFFFFF on all
+#      app X11 windows so the overlay follows every virtual desktop.
+#   4. ole32.dll RevokeDragDrop binary patch — REQUIRED, applied by setup.sh
+#      (WineHQ bug 60225; without it the app dies silently after ~35 s).
+#
+# Layout assumptions (override via env):
+#   STEAM_CLIENT   Flatpak Steam data root       (env: WUWA_STEAM_CLIENT)
+#   COMPAT_DATA    game compat prefix            (env: WUWA_COMPAT_DATA)
+#   ENTRY_POINT    SteamLinuxRuntime _v2-entry   (env: WUWA_ENTRY_POINT)
+#   PROTON_BIN     Proton runner                 (env: WUWA_PROTON)
+#   WV2_DIR        WebView2 runtime in-prefix    (env: WUWA_WV2_DIR)
+#   PYTHON_WIN     in-prefix python for sidecars (env: WUWA_PYTHON_WIN)
+# Other knobs:
+#   WUWA_DIAG=1                   add WINEDEBUG=+err,+seh debug output
+#   WUWA_WV2_FLAGS=...            override WebView2 Chromium flags
+#   WUWA_APP_EXE_WIN=...          override the exe path inside the prefix
+set -euo pipefail
+
+APP_ID="3513350"
+APP_EXE_WIN="${WUWA_APP_EXE_WIN:-'C:\\Program Files\\WuwaTappoGlobal\\WuwaTappo.exe'}"
+STEAM_CLIENT="${WUWA_STEAM_CLIENT:-$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam}"
+COMPAT_DATA="${WUWA_COMPAT_DATA:-/var/mnt/LData/SteamLibrary/steamapps/compatdata/${APP_ID}}"
+ENTRY_POINT="${WUWA_ENTRY_POINT:-/var/mnt/LData/SteamLibrary/steamapps/common/SteamLinuxRuntime_4/_v2-entry-point}"
+PROTON_BIN="${WUWA_PROTON:-${STEAM_CLIENT}/compatibilitytools.d/DW-Proton Latest/proton}"
+WV2_DIR="${WUWA_WV2_DIR:-'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\156.0.4314.50'}"
+PYTHON_WIN="${WUWA_PYTHON_WIN:-'C:\\users\\steamuser\\AppData\\Local\\ok-ww\\data\\apps\\ok-ww\\python\\python.exe'}"
+FIX_LINUX="${COMPAT_DATA}/pfx/webview2_render_fix.py"
+SIDECAR_LINUX="${COMPAT_DATA}/pfx/tappo_sidecar.py"
+# The prefix's z: drive maps to / , so /host/path -> Z:\host\path
+winpath() { printf 'Z:%s' "${1//\//\\}"; }
+FIX_WIN="$(winpath "${COMPAT_DATA}/pfx/webview2_render_fix.py")"
+SIDECAR_WIN="$(winpath "${COMPAT_DATA}/pfx/tappo_sidecar.py")"
+
+# Required WebView2 Chromium flags under Wine (GPU/sandbox paths break inside
+# the bwrap container and the WebView2 create fails without these).
+WV2_FLAGS='--no-sandbox --disable-gpu --disable-gpu-compositing --disable-gpu-rasterization --in-process-gpu --disable-features=RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy,DirectComposition,DirectCompositionLayers,WidgetLayering --disable-direct-composition-video-overlays --disable-accelerated-2d-canvas --disable-accelerated-video-decode'
+if [ -n "${WUWA_WV2_FLAGS:-}" ]; then WV2_FLAGS="${WUWA_WV2_FLAGS}"; fi
+
+[ -x "${PROTON_BIN}" ] || { echo "Proton not found: ${PROTON_BIN}" >&2; exit 1; }
+
+# Singleton guard: refuse a second launch (duplicate taskbar windows).
+if pgrep -f '[W]uwaTappo\.exe' >/dev/null 2>&1; then
+    echo "WuwaTappo is already running; not starting a second instance." >&2
+    exit 0
+fi
+
+# Reap leftovers from a previous crashed session of THIS app only. A global
+# 'pkill -f msedgewebview2.exe' would also kill the WebView2 children of a
+# concurrently running ok-wuwa (same Wine prefix pattern), so kill by our own
+# PID tree instead.
+reap_tree() {
+    local root="$1"
+    [ -n "${root}" ] || return 0
+    local kids
+    kids="$(pgrep -P "${root}" 2>/dev/null || true)"
+    for k in ${kids}; do
+        reap_tree "${k}"
+    done
+    kill "${root}" 2>/dev/null || true
+}
+
+cleanup() {
+    reap_sticky
+    if [ -n "${APP_PID:-}" ] && kill -0 "${APP_PID}" 2>/dev/null; then
+        reap_tree "${APP_PID}"
+    fi
+    if [ -n "${PGID:-}" ] && [ "${PGID}" != "0" ]; then
+        kill -- "-${PGID}" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
+
+[ -f "${FIX_LINUX}" ] || { echo "Missing ${FIX_LINUX}; run setup." >&2; exit 1; }
+[ -f "${SIDECAR_LINUX}" ] || { echo "Missing ${SIDECAR_LINUX}; run setup." >&2; exit 1; }
+
+# Inner command: app and render-fix sidecar both in background; wait keeps
+# the container alive while the app runs. The sidecar must NOT be the
+# foreground process: when it exits (nudge ok -> exit 0) the foreground
+# context ends and the container is torn down, killing the app.
+INNER="
+    '${PROTON_BIN}' runinprefix '${APP_EXE_WIN}' &
+    '${PROTON_BIN}' runinprefix '${PYTHON_WIN}' '${SIDECAR_WIN}' &
+    '${PROTON_BIN}' runinprefix '${PYTHON_WIN}' '${FIX_WIN}' &
+    wait
+"
+
+FPK_ARGS=(
+    --env=STEAM_COMPAT_CLIENT_INSTALL_PATH="${STEAM_CLIENT}"
+    --env=STEAM_COMPAT_DATA_PATH="${COMPAT_DATA}"
+    --env=WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="${WV2_FLAGS}"
+    --env=WEBVIEW2_BROWSER_EXECUTABLE_FOLDER="${WV2_DIR}"
+)
+if [ "${WUWA_DIAG:-0}" = "1" ]; then
+    FPK_ARGS+=(--env=WINEDEBUG='+err,+seh')
+fi
+if [ -n "${WUWA_WINEDEBUG:-}" ]; then
+    FPK_ARGS+=(--env=WINEDEBUG="${WUWA_WINEDEBUG}")
+fi
+
+# Keep app windows on all virtual desktops (EWMH sticky): pet overlay follows
+# every desktop, and host-side screenshots see the true window contents.
+python3 "${COMPAT_DATA}/pfx/sticky_daemon.py" >/dev/null 2>&1 &
+STICKY_PID=$!
+reap_sticky() { kill "${STICKY_PID}" 2>/dev/null || true; }
+
+setsid flatpak run \
+    "${FPK_ARGS[@]}" \
+    --command="${ENTRY_POINT}" \
+    com.valvesoftware.Steam \
+    --verb=runinprefix -- bash -c "${INNER}" &
+APP_PID=$!
+PGID="$(ps -o pgid= -p "${APP_PID}" 2>/dev/null | tr -d ' ')"
+
+wait "${APP_PID}" 2>/dev/null || true

@@ -1,0 +1,4 @@
+# Local scratch / machine-specific paths — never commit
+*.log
+*.bak
+__pycache__/
