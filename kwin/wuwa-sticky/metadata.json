@@ -1,0 +1,13 @@
+{
+    "KPlugin": {
+        "Id": "wuwa-sticky",
+        "Name": "Wuwa Sticky",
+        "Description": "Keep WuwaTappo windows on all virtual desktops",
+        "Version": "1.0",
+        "License": "MIT",
+        "Authors": [{"Name": "khoipm06"}]
+    },
+    "X-Plasma-API": "javascript",
+    "X-Plasma-MainScript": "code/main.js",
+    "KPackageStructure": "KWin/Script"
+}

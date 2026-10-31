@@ -34,7 +34,22 @@ mkdir -p "${HOME}/.local/bin"
 install -m 0755 wuwa-tappo "${HOME}/.local/bin/wuwa-tappo"
 echo "installed: ${HOME}/.local/bin/wuwa-tappo"
 
-# 4. Apply/verify the ole32 patch
+# 4. Install KWin sticky script (optional, KDE Plasma Wayland)
+KWIN_SCRIPT_DIR="${HOME}/.local/share/kwin/scripts/wuwa-sticky"
+if [ -d "${REPO_DIR}/kwin/wuwa-sticky" ]; then
+    mkdir -p "${KWIN_SCRIPT_DIR}/contents/code"
+    install -m 0644 "${REPO_DIR}/kwin/wuwa-sticky/metadata.json" "${KWIN_SCRIPT_DIR}/metadata.json"
+    install -m 0644 "${REPO_DIR}/kwin/wuwa-sticky/contents/code/main.js" "${KWIN_SCRIPT_DIR}/contents/code/main.js"
+    if command -v kwriteconfig6 >/dev/null 2>&1; then
+        kwriteconfig6 --file kwinrc --group Plugins --key wuwa-stickyEnabled true
+        if command -v qdbus-qt6 >/dev/null 2>&1; then
+            qdbus-qt6 org.kde.KWin /KWin reconfigure 2>/dev/null || true
+        fi
+        echo "installed & enabled: KWin sticky script (wuwa-sticky)"
+    fi
+fi
+
+# 5. Apply/verify the ole32 patch
 if [ -f "${OLE32}" ]; then
     python3 patches/patch_ole32.py "${OLE32}"
 else

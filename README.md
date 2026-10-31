@@ -84,7 +84,9 @@ app-agnostic (they patch Wine, not the app).
 ```
 wuwa-tappo                 bash launcher: singleton guard, PID-tree reaper,
                            env plumbing, sidecar + sticky daemon lifecycle
-setup.sh                   installs sidecars + applies/verifies the ole32 patch
+setup.sh                   installs sidecars, KWin script + applies/verifies ole32 patch
+kwin/
+  wuwa-sticky/             KWin script package to keep pet sticky and borderless on KDE
 patches/
   patch_ole32.py           binary patcher: locates RevokeDragDrop via the PE
                            export table, verifies original bytes, writes
