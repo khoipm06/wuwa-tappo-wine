@@ -61,25 +61,26 @@ defensively (export-table lookup, prologue verification, `.bak`).
 **Verification:** post-patch sessions ran 20–60+ min with zero
 `c0000005`, zero GPU exits, zero new crashpad dumps.
 
-## 3. First frame never presented
+## 3. First frame never presented & Drag Glitching
 
-**Symptom:** windows mapped, processes healthy, but pixels never change —
-pure black (dark theme) / pure white (dialog) surfaces. Pixel sampling of
-X11 windows showed `distinct=1`.
+**Symptom:** Without fixes, windows mapped and processes healthy, but pixels never changed
+(pure white surface). Under software rendering workarounds, dragging the pet caused
+continuous flashing of black and white checkerboard tiles.
 
-**Mechanism:** on Wine, Chromium ignores window-bounds deltas of 1 px when
-deciding whether to re-create its swapchain surface. The surface created at
-launch is therefore never re-created, and the first frame is never presented.
-The same WebView2 build on real Windows presents fine.
+**Mechanism:**
+1. **First-frame freeze**: Chromium enables `CalculateNativeWinOcclusion` on Windows.
+   Because Wine lacks DWM occlusion tracking, `WS_EX_LAYERED | WS_EX_TRANSPARENT` windows
+   were falsely flagged as `OCCLUDED`, causing Chromium to freeze compositor frame presentation.
+2. **Dragging glitch (checkerboarding)**: Forcing software compositing offloaded rasterization
+   to the CPU. When dragging, mouse events overwhelmed the CPU rasterizer, missing frame deadlines
+   and triggering `cc::SoftwareRenderer` checkerboard fallback (white/black placeholder tiles).
 
-**Fix:** `SetWindowPos` cycle of **+4 px then back** on every `Tauri Window`
-top-level (ok-ww's proven nudge, generalized to *all* windows because the
-update dialog / About / Toast windows appear later). Implemented in
-`sidecars/tappo_sidecar.py`, running inside the prefix via the ok-ww bundled
-`python.exe`.
-
-**Verification:** light-gray text bands (dark-theme UI) appear in screenshots
-after the nudge; window pixel histogram goes from 1 distinct color to 100+.
+**Clean Fix (No sidecars or position nudges needed):**
+- Launch flags:
+  `--in-process-gpu --disable-direct-composition --disable-features=CalculateNativeWinOcclusion,DirectComposition,DirectCompositionLayers... --disable-checker-imaging --disable-partial-raster`
+- Runs GPU rendering directly via DXVK swapchain inside the process.
+- Frame 1 presents immediately without `SetWindowPos` hacks.
+- Dragging is silky smooth with zero tile tearing.
 
 ## 4. Multi-desktop & observability
 

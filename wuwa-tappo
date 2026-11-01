@@ -25,17 +25,81 @@ set -euo pipefail
 [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/wuwa-tappo/env" ] && . "${XDG_CONFIG_HOME:-$HOME/.config}/wuwa-tappo/env"
 
 APP_EXE_WIN="${WUWA_APP_EXE_WIN:-C:\\Program Files\\WuwaTappoGlobal\\WuwaTappo.exe}"
-STEAM_CLIENT="${WUWA_STEAM_CLIENT:-$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam}"
-# Prefix must live where the flatpak sandbox can write (/mnt, /media, or ~/.var/app/...)
-COMPAT_DATA="${WUWA_COMPAT_DATA:-$HOME/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix}"
+if [ -z "${WUWA_STEAM_CLIENT:-}" ]; then
+    if [ -d "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam" ]; then
+        STEAM_CLIENT="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+    elif [ -d "$HOME/.local/share/Steam" ]; then
+        STEAM_CLIENT="$HOME/.local/share/Steam"
+    elif [ -d "$HOME/.steam/steam" ]; then
+        STEAM_CLIENT="$HOME/.steam/steam"
+    elif [ -d "$HOME/.steam/root" ]; then
+        STEAM_CLIENT="$HOME/.steam/root"
+    else
+        STEAM_CLIENT="$HOME/.local/share/Steam"
+    fi
+else
+    STEAM_CLIENT="${WUWA_STEAM_CLIENT}"
+fi
+
+DEFAULT_PFX="$HOME/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix"
+[ -d "$HOME/.var/app/com.valvesoftware.Steam" ] || DEFAULT_PFX="$HOME/.local/share/tappo-prefix"
+COMPAT_DATA="${WUWA_COMPAT_DATA:-${DEFAULT_PFX}}"
+
 if [ -z "${WUWA_ENTRY_POINT:-}" ]; then
-    # SteamLinuxRuntime lives beside the game library; glob every library root
-    ENTRY_POINT="$(ls -d /var/mnt/*/SteamLibrary/steamapps/common/SteamLinuxRuntime_*/_v2-entry-point \
-                        "${STEAM_CLIENT}"/steamapps/common/SteamLinuxRuntime_*/_v2-entry-point 2>/dev/null | sort -V | tail -1 || true)"
+    ENTRY_POINT="$(python3 - << 'EOF' "${STEAM_CLIENT}"
+import glob, os, re, sys
+steam_client = sys.argv[1]
+candidates = []
+lib_dirs = [steam_client]
+for vdf in (
+    os.path.join(steam_client, "steamapps", "libraryfolders.vdf"),
+    os.path.join(steam_client, "config", "libraryfolders.vdf"),
+    os.path.expanduser("~/.steam/steam/steamapps/libraryfolders.vdf"),
+    os.path.expanduser("~/.local/share/Steam/steamapps/libraryfolders.vdf"),
+):
+    if os.path.isfile(vdf):
+        try:
+            with open(vdf, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    m = re.search(r'"path"\s+"([^"]+)"', line)
+                    if m and os.path.isdir(m.group(1)):
+                        lib_dirs.append(m.group(1))
+        except Exception:
+            pass
+
+for pattern in ("/mnt/*", "/media/*", "/run/media/*/*", "/run/media/*", "/var/mnt/*"):
+    for p in glob.glob(pattern):
+        if os.path.isdir(p):
+            lib_dirs.append(p)
+            lib_dirs.append(os.path.join(p, "SteamLibrary"))
+
+seen = set()
+for lib in lib_dirs:
+    if lib in seen:
+        continue
+    seen.add(lib)
+    for ep in glob.glob(os.path.join(lib, "steamapps", "common", "SteamLinuxRuntime*", "_v2-entry-point")):
+        if os.access(ep, os.X_OK):
+            candidates.append(ep)
+
+candidates.sort()
+if candidates:
+    print(candidates[-1])
+EOF
+)"
 else
     ENTRY_POINT="${WUWA_ENTRY_POINT}"
 fi
-PROTON_BIN="${WUWA_PROTON:-${STEAM_CLIENT}/compatibilitytools.d/DW-Proton Latest/proton}"
+
+if [ -z "${WUWA_PROTON:-}" ]; then
+    if [ -x "${STEAM_CLIENT}/compatibilitytools.d/DW-Proton Latest/proton" ]; then
+        PROTON_BIN="${STEAM_CLIENT}/compatibilitytools.d/DW-Proton Latest/proton"
+    else
+        PROTON_BIN="$(find "${STEAM_CLIENT}/compatibilitytools.d" -maxdepth 2 -name proton -type f 2>/dev/null | sort | tail -1)"
+    fi
+else
+    PROTON_BIN="${WUWA_PROTON}"
+fi
 # Auto-detect WebView2 version installed in this prefix
 if [ -z "${WUWA_WV2_DIR:-}" ]; then
     _wv2_ver="$(ls "${COMPAT_DATA}/pfx/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/" 2>/dev/null | grep -E '^[0-9]+\.' | sort -V | tail -1)"
@@ -43,17 +107,10 @@ if [ -z "${WUWA_WV2_DIR:-}" ]; then
 else
     WV2_DIR="${WUWA_WV2_DIR}"
 fi
-# Python runtime for nudge sidecars (embeddable, installed by setup)
-PYTHON_WIN="${WUWA_PYTHON_WIN:-C:\\tools\\python\\python.exe}"
-FIX_LINUX="${COMPAT_DATA}/pfx/webview2_render_fix.py"
-SIDECAR_LINUX="${COMPAT_DATA}/pfx/tappo_sidecar.py"
-# Z: drive maps the host root into the prefix
-winpath() { printf 'Z:%s' "${1//\//\\}"; }
-FIX_WIN="$(winpath "${FIX_LINUX}")"
-SIDECAR_WIN="$(winpath "${SIDECAR_LINUX}")"
-
-# WebView2 Chromium flags required under Wine/Proton bwrap container
-WV2_FLAGS='--no-sandbox --disable-gpu --disable-gpu-compositing --disable-gpu-rasterization --in-process-gpu --disable-features=RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy,DirectComposition,DirectCompositionLayers,WidgetLayering --disable-direct-composition-video-overlays --disable-accelerated-2d-canvas --disable-accelerated-video-decode'
+# WebView2 Chromium flags: in-process GPU via DXVK swapchain, no DComp crash,
+# native occlusion disabled (forces immediate presentation without nudge),
+# checker-imaging and partial raster disabled (eliminates black/white tile glitch on drag).
+WV2_FLAGS='--no-sandbox --in-process-gpu --disable-direct-composition --disable-features=CalculateNativeWinOcclusion,DirectComposition,DirectCompositionLayers,WidgetLayering,RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy --disable-direct-composition-video-overlays --disable-checker-imaging --disable-partial-raster --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --enable-features=RunAllCompositorStagesBeforeDraw'
 if [ -n "${WUWA_WV2_FLAGS:-}" ]; then WV2_FLAGS="${WUWA_WV2_FLAGS}"; fi
 
 export WEBVIEW2_DEFAULT_BACKGROUND_COLOR="${WEBVIEW2_DEFAULT_BACKGROUND_COLOR:-00000000}"
@@ -152,27 +209,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-[ -f "${FIX_LINUX}" ]    || { echo "Missing ${FIX_LINUX}; run setup.sh" >&2; exit 1; }
-[ -f "${SIDECAR_LINUX}" ] || { echo "Missing ${SIDECAR_LINUX}; run setup.sh" >&2; exit 1; }
-
-# Inner script: app + nudge sidecars run concurrently; main process waits on app PID
+# Inner script: app runs directly via Proton
 INNER="
     export WEBVIEW2_DEFAULT_BACKGROUND_COLOR='${WEBVIEW2_DEFAULT_BACKGROUND_COLOR}'
     export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='${WV2_FLAGS}'
     export WEBVIEW2_BROWSER_EXECUTABLE_FOLDER='${WV2_DIR}'
 
-    \"${PROTON_BIN}\" runinprefix \"${APP_EXE_WIN}\" &
-    MAIN_PID=\$!
-    \"${PROTON_BIN}\" runinprefix \"${PYTHON_WIN}\" \"${SIDECAR_WIN}\" &
-    SIDECAR_PID=\$!
-    \"${PROTON_BIN}\" runinprefix \"${PYTHON_WIN}\" \"${FIX_WIN}\" &
-    FIX_PID=\$!
-
-    wait \"\${MAIN_PID}\"
+    \"${PROTON_BIN}\" runinprefix \"${APP_EXE_WIN}\"
     APP_EXIT=\$?
-
-    kill \"\${SIDECAR_PID}\" \"\${FIX_PID}\" 2>/dev/null || true
-    wait 2>/dev/null || true
     exit \${APP_EXIT}
 "
 

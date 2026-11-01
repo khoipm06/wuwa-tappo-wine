@@ -46,14 +46,15 @@ permissions allow `filesystems=/mnt;/media;/run/media;...;~/.var/app/com.valveso
 
 Use any of:
 
-- `/mnt/<disk>/tappo-prefix` (example: `/var/mnt/LData/tappo-prefix`)
+- `/mnt/<disk>/tappo-prefix`
 - `/run/media/<user>/<disk>/tappo-prefix`
-- `~/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix` (default)
+- `~/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix` (default for Flatpak Steam)
+- `~/.local/share/tappo-prefix` (default for native Steam)
 
 Point the launcher at your choice in `~/.config/wuwa-tappo/env`:
 
 ```sh
-WUWA_COMPAT_DATA=/var/mnt/LData/tappo-prefix
+WUWA_COMPAT_DATA="$HOME/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix"
 ```
 
 ## Creating the prefix
@@ -61,9 +62,10 @@ WUWA_COMPAT_DATA=/var/mnt/LData/tappo-prefix
 By hand, the order matters:
 
 ```sh
-COMPAT=/var/mnt/LData/tappo-prefix          # must be flatpak-writable
+COMPAT="$HOME/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix"   # must be flatpak-writable if using Flatpak Steam
 PROTON="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam/compatibilitytools.d/DW-Proton Latest/proton"
-ENTRY=/var/mnt/LData/SteamLibrary/steamapps/common/SteamLinuxRuntime_4/_v2-entry-point
+# ENTRY is auto-detected by wuwa-tappo from libraryfolders.vdf, or specify manually:
+# ENTRY="/path/to/SteamLinuxRuntime_4/_v2-entry-point"
 
 fp() { flatpak run --env=STEAM_COMPAT_CLIENT_INSTALL_PATH="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam" \
         --env=STEAM_COMPAT_DATA_PATH="$COMPAT" --command="$ENTRY" com.valvesoftware.Steam \
@@ -91,11 +93,12 @@ and sets `ScreenDepth=32` on the two AppDefaults keys only.
 ```sh
 git clone https://github.com/khoipm06/wuwa-tappo-wine.git
 cd wuwa-tappo-wine
-WUWA_COMPAT_DATA=/var/mnt/LData/tappo-prefix ./setup.sh
+# If your prefix is not at default location:
+# export WUWA_COMPAT_DATA=/path/to/tappo-prefix
+./setup.sh
 ```
 
-`setup.sh` is idempotent: it verifies the `ole32.dll` patch by hash, keeps a
-`.bak` of the stock DLL, and only rewrites the file when the patch is missing.
+`setup.sh` is idempotent: it verifies the `ole32.dll` patch by hash and only rewrites the file when the patch is missing.
 
 ## Run
 

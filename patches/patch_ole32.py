@@ -10,7 +10,7 @@ cleanup is skipped, and the process is exiting anyway.
 The patcher is defensive:
   * locates RevokeDragDrop through the PE export table (no hardcoded offsets),
   * verifies the expected stock prologue before touching anything,
-  * keeps ole32.dll.bak (idempotent re-runs are no-ops),
+  * idempotent re-runs are no-ops,
   * refuses DLLs whose architecture/size look unexpected.
 
 Usage: patch_ole32.py <path-to-Proton>/files/lib/wine/x86_64-windows/ole32.dll
@@ -81,12 +81,7 @@ def main(path):
             f"  expected {EXPECTED_PROLOGUE.hex()}\n"
             "This ole32.dll build is not supported; refusing to patch."
         )
-    bak = path + ".bak"
-    try:
-        open(bak, "rb").close()
-    except FileNotFoundError:
-        shutil.copy2(path, bak)
-        print(f"backup written: {bak}")
+    # Direct in-place patch without backup (user requested no backups)
     import os, stat as st
     mode = os.stat(path).st_mode
     if not mode & st.S_IWUSR:

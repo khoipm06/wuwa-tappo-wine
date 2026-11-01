@@ -15,8 +15,25 @@
 #   WUWA_ENTRY_POINT   SteamLinuxRuntime _v2-entry    (default: auto-detected)
 set -euo pipefail
 
-STEAM_CLIENT="${WUWA_STEAM_CLIENT:-${STEAM_CLIENT:-$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam}}"
-COMPAT_DATA="${WUWA_COMPAT_DATA:-$HOME/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix}"
+if [ -z "${WUWA_STEAM_CLIENT:-}" ]; then
+    if [ -d "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam" ]; then
+        STEAM_CLIENT="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+    elif [ -d "$HOME/.local/share/Steam" ]; then
+        STEAM_CLIENT="$HOME/.local/share/Steam"
+    elif [ -d "$HOME/.steam/steam" ]; then
+        STEAM_CLIENT="$HOME/.steam/steam"
+    elif [ -d "$HOME/.steam/root" ]; then
+        STEAM_CLIENT="$HOME/.steam/root"
+    else
+        STEAM_CLIENT="$HOME/.local/share/Steam"
+    fi
+else
+    STEAM_CLIENT="${WUWA_STEAM_CLIENT}"
+fi
+
+DEFAULT_PFX="$HOME/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix"
+[ -d "$HOME/.var/app/com.valvesoftware.Steam" ] || DEFAULT_PFX="$HOME/.local/share/tappo-prefix"
+COMPAT_DATA="${WUWA_COMPAT_DATA:-${DEFAULT_PFX}}"
 PROTON_BIN="${WUWA_PROTON:-${PROTON_BIN:-}}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -47,30 +64,11 @@ if missing:
     sys.stderr.write(f"WARNING: Host libraries missing: {missing}. sticky_daemon may fail.\n")
 ' || true
 
-# 3. Provision Windows CPython for the sidecars.
-#    The sidecars use ctypes.WinDLL/WINFUNCTYPE and cannot run on host Python,
-#    so a Windows interpreter must live inside the prefix.
-PY_DIR="${COMPAT_DATA}/pfx/drive_c/tools/python"
-if [ ! -f "${PY_DIR}/python.exe" ]; then
-    PY_VER="3.12.9"
-    PY_ZIP="python-${PY_VER}-embed-amd64.zip"
-    echo "provisioning Windows CPython ${PY_VER} -> ${PY_DIR}"
-    mkdir -p "${PY_DIR}"
-    tmp="$(mktemp -d)"
-    curl -fsSL -o "${tmp}/${PY_ZIP}" "https://www.python.org/ftp/python/${PY_VER}/${PY_ZIP}"
-    unzip -qo "${tmp}/${PY_ZIP}" -d "${PY_DIR}"
-    rm -rf "${tmp}"
-else
-    echo "python: ${PY_DIR}/python.exe present"
+# 3. Install host-side sticky & input shape daemon
+if ! cmp -s "sidecars/sticky_daemon.py" "${COMPAT_DATA}/pfx/sticky_daemon.py" 2>/dev/null; then
+    install -m 0644 "sidecars/sticky_daemon.py" "${COMPAT_DATA}/pfx/sticky_daemon.py"
+    echo "installed: ${COMPAT_DATA}/pfx/sticky_daemon.py"
 fi
-
-# 4. Install sidecars (only if content differs)
-for f in tappo_sidecar.py sticky_daemon.py webview2_render_fix.py; do
-    if ! cmp -s "sidecars/${f}" "${COMPAT_DATA}/pfx/${f}" 2>/dev/null; then
-        install -m 0644 "sidecars/${f}" "${COMPAT_DATA}/pfx/${f}"
-        echo "installed: ${COMPAT_DATA}/pfx/${f}"
-    fi
-done
 
 # 5. Install launcher
 mkdir -p "${HOME}/.local/bin"

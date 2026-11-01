@@ -4,26 +4,33 @@
 
 ```text
 --no-sandbox
---disable-gpu
---disable-gpu-compositing
---disable-gpu-rasterization
 --in-process-gpu
---disable-features=RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy,DirectComposition,DirectCompositionLayers,WidgetLayering
+--disable-direct-composition
+--disable-features=CalculateNativeWinOcclusion,DirectComposition,DirectCompositionLayers,WidgetLayering,RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy
 --disable-direct-composition-video-overlays
---disable-accelerated-2d-canvas
---disable-accelerated-video-decode
+--disable-checker-imaging
+--disable-partial-raster
+--disable-backgrounding-occluded-windows
+--disable-renderer-backgrounding
+--disable-background-timer-throttling
+--enable-features=RunAllCompositorStagesBeforeDraw
 ```
 
 Rationale per group:
 
 - `--no-sandbox` — the Chromium sandbox cannot initialize inside the
   pressure-vessel/bwrap container (nested namespace + wine style paths).
-- `--in-process-gpu` — removes the separate GPU process entirely, ending the
-  DComp `E_NOTIMPL` crash-loop (the GPU "process" crash was the browser giving
-  up after 6 child-process crashes).
-- `--disable-features=…DirectComposition…` — blocks the DComp code paths that
-  have no Wine implementation.
-- Renderer-level disables — belt-and-braces for the software compositing path.
+- `--in-process-gpu` — runs GPU threads within the browser process, bypassing
+  WineHQ bug 59370 (cross-process NT shared handles in DXVK/Wine).
+- `--disable-direct-composition` & `--disable-features=…DirectComposition…` —
+  directs Chromium to use DXGI SwapChain -> DXVK -> Vulkan directly, bypassing
+  Wine's stubbed `dcomp.dll` (0x80004001 E_NOTIMPL).
+- `--disable-features=CalculateNativeWinOcclusion` & `--disable-backgrounding-occluded-windows` —
+  Wine lacks DWM occlusion tracking, causing Chromium to mark layered transparent windows as
+  occluded and freeze compositor frame presentation. Disabling native occlusion allows
+  Chromium to present the first frame immediately without any external `SetWindowPos` nudge!
+- `--disable-checker-imaging` & `--disable-partial-raster` — eliminates black/white checkerboard
+  tile glitching when dragging/moving the pet across the screen.
 
 ## Delivery channels (this was the tricky part)
 
