@@ -25,8 +25,13 @@ static void nudge(HWND h) {
     int h_px = r.bottom - r.top;
     if (w <= 0 || h_px <= 0) return;
 
-    SetWindowPos(h, NULL, r.left, r.top, w + 4, h_px + 4, SWP_NOZORDER | SWP_NOACTIVATE);
-    Sleep(50);
+    // Use negative delta (-4px) so fullscreen/maximized windows (e.g. 2560x1600 pet overlay)
+    // are never clamped by Wine to display resolution bounds.
+    int nw = (w > 10) ? (w - 4) : (w + 4);
+    int nh = (h_px > 10) ? (h_px - 4) : (h_px + 4);
+
+    SetWindowPos(h, NULL, r.left, r.top, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
+    Sleep(60);
     SetWindowPos(h, NULL, r.left, r.top, w, h_px, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
