@@ -1,72 +1,80 @@
 #!/usr/bin/env bash
-# WuWa Tappo — launches WuwaTappoGlobal's WuwaTappo.exe (WebView2 companion app)
-# inside the game's Steam Linux Runtime container via Proton.
+# WuWa Tappo — launches WuwaTappo.exe (Tauri/WebView2 desktop companion) via Proton
+# inside an isolated Wine prefix, separate from the Wuthering Waves game prefix.
 #
-# Three mechanisms (see docs/root-cause.md for the full evidence chain):
-#   1. WebView2 Chromium flags — stop the DComp/GPU crash-loop inside the
-#      pressure-vessel container (WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS).
-#   2. SetWindowPos nudge sidecars — on Wine, Chromium ignores 1px window-bounds
-#      deltas, so the surface created at launch is never re-created and the
-#      first frame is never presented (white/blank windows). webview2_render_fix.py
-#      nudges the main window; tappo_sidecar.py nudges EVERY Tauri window
-#      (update dialog, About, Toast appear later) for 8 minutes.
-#   3. sticky_daemon.py — host-side, sets EWMH _NET_WM_DESKTOP=0xFFFFFFFF on all
-#      app X11 windows so the overlay follows every virtual desktop.
-#   4. ole32.dll RevokeDragDrop binary patch — REQUIRED, applied by setup.sh
-#      (WineHQ bug 60225; without it the app dies silently after ~35 s).
+# Fixes applied (see docs/root-cause.md):
+#   1. WebView2 Chromium flags     — prevents DComp/GPU crash inside the bwrap container
+#   2. SetWindowPos nudge sidecars — forces Chromium to present its first frame
+#   3. sticky_daemon               — EWMH _NET_WM_DESKTOP=0xFFFFFFFF overlay on all desktops
+#   4. ole32.dll patch             — prefix-local RevokeDragDrop→S_OK (WineHQ bug 60225)
 #
-# Layout assumptions (override via env):
-#   STEAM_CLIENT   Flatpak Steam data root       (env: WUWA_STEAM_CLIENT)
-#   COMPAT_DATA    game compat prefix            (env: WUWA_COMPAT_DATA)
-#   ENTRY_POINT    SteamLinuxRuntime _v2-entry   (env: WUWA_ENTRY_POINT)
-#   PROTON_BIN     Proton runner                 (env: WUWA_PROTON)
-#   WV2_DIR        WebView2 runtime in-prefix    (env: WUWA_WV2_DIR)
-#   PYTHON_WIN     in-prefix python for sidecars (env: WUWA_PYTHON_WIN)
-# Other knobs:
-#   WUWA_DIAG=1                   add WINEDEBUG=+err,+seh debug output
-#   WUWA_WV2_FLAGS=...            override WebView2 Chromium flags
-#   WUWA_APP_EXE_WIN=...          override the exe path inside the prefix
+# Layout defaults (all overridable via env):
+#   WUWA_COMPAT_DATA   Tappo compat dir              (~/.local/share/tappo-prefix)
+#   WUWA_STEAM_CLIENT  Flatpak Steam data root        (~/.var/app/…/Steam)
+#   WUWA_ENTRY_POINT   SteamLinuxRuntime _v2-entry    (auto-detected)
+#   WUWA_PROTON        Proton runner binary            (DW-Proton Latest)
+#   WUWA_WV2_DIR       WebView2 runtime Windows path  (auto-detected from registry)
+#   WUWA_APP_EXE_WIN   WuwaTappo.exe Windows path     (C:\Program Files\…)
+#
+# Diagnostics:
+#   WUWA_DIAG=1        enable WINEDEBUG=+err,+seh
+#   WUWA_WV2_FLAGS=…   override Chromium flags
 set -euo pipefail
 
-APP_ID="3513350"
+# Optional user config (export WUWA_COMPAT_DATA=... to relocate the prefix)
+[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/wuwa-tappo/env" ] && . "${XDG_CONFIG_HOME:-$HOME/.config}/wuwa-tappo/env"
+
 APP_EXE_WIN="${WUWA_APP_EXE_WIN:-C:\\Program Files\\WuwaTappoGlobal\\WuwaTappo.exe}"
 STEAM_CLIENT="${WUWA_STEAM_CLIENT:-$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam}"
-COMPAT_DATA="${WUWA_COMPAT_DATA:-/var/mnt/LData/SteamLibrary/steamapps/compatdata/${APP_ID}}"
-ENTRY_POINT="${WUWA_ENTRY_POINT:-/var/mnt/LData/SteamLibrary/steamapps/common/SteamLinuxRuntime_4/_v2-entry-point}"
+# Prefix must live where the flatpak sandbox can write (/mnt, /media, or ~/.var/app/...)
+COMPAT_DATA="${WUWA_COMPAT_DATA:-$HOME/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix}"
+if [ -z "${WUWA_ENTRY_POINT:-}" ]; then
+    # SteamLinuxRuntime lives beside the game library; glob every library root
+    ENTRY_POINT="$(ls -d /var/mnt/*/SteamLibrary/steamapps/common/SteamLinuxRuntime_*/_v2-entry-point \
+                        "${STEAM_CLIENT}"/steamapps/common/SteamLinuxRuntime_*/_v2-entry-point 2>/dev/null | sort -V | tail -1 || true)"
+else
+    ENTRY_POINT="${WUWA_ENTRY_POINT}"
+fi
 PROTON_BIN="${WUWA_PROTON:-${STEAM_CLIENT}/compatibilitytools.d/DW-Proton Latest/proton}"
-WV2_DIR="${WUWA_WV2_DIR:-C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\156.0.4314.50}"
-PYTHON_WIN="${WUWA_PYTHON_WIN:-C:\\users\\steamuser\\AppData\\Local\\ok-ww\\data\\apps\\ok-ww\\python\\python.exe}"
+# Auto-detect WebView2 version installed in this prefix
+if [ -z "${WUWA_WV2_DIR:-}" ]; then
+    _wv2_ver="$(ls "${COMPAT_DATA}/pfx/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/" 2>/dev/null | grep -E '^[0-9]+\.' | sort -V | tail -1)"
+    WV2_DIR="C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\${_wv2_ver:-156.0.4314.50}"
+else
+    WV2_DIR="${WUWA_WV2_DIR}"
+fi
+# Python runtime for nudge sidecars (embeddable, installed by setup)
+PYTHON_WIN="${WUWA_PYTHON_WIN:-C:\\tools\\python\\python.exe}"
 FIX_LINUX="${COMPAT_DATA}/pfx/webview2_render_fix.py"
 SIDECAR_LINUX="${COMPAT_DATA}/pfx/tappo_sidecar.py"
-# The prefix's z: drive maps to / , so /host/path -> Z:\host\path
-winpath() { printf 'Z:%s' "${1//\//\\\\}"; }
-FIX_WIN="$(winpath "${COMPAT_DATA}/pfx/webview2_render_fix.py")"
-SIDECAR_WIN="$(winpath "${COMPAT_DATA}/pfx/tappo_sidecar.py")"
+# Z: drive maps the host root into the prefix
+winpath() { printf 'Z:%s' "${1//\//\\}"; }
+FIX_WIN="$(winpath "${FIX_LINUX}")"
+SIDECAR_WIN="$(winpath "${SIDECAR_LINUX}")"
 
-# Required WebView2 Chromium flags under Wine (GPU/sandbox paths break inside
-# the bwrap container and the WebView2 create fails without these).
+# WebView2 Chromium flags required under Wine/Proton bwrap container
 WV2_FLAGS='--no-sandbox --disable-gpu --disable-gpu-compositing --disable-gpu-rasterization --in-process-gpu --disable-features=RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy,DirectComposition,DirectCompositionLayers,WidgetLayering --disable-direct-composition-video-overlays --disable-accelerated-2d-canvas --disable-accelerated-video-decode'
 if [ -n "${WUWA_WV2_FLAGS:-}" ]; then WV2_FLAGS="${WUWA_WV2_FLAGS}"; fi
 
 export WEBVIEW2_DEFAULT_BACKGROUND_COLOR="${WEBVIEW2_DEFAULT_BACKGROUND_COLOR:-00000000}"
 
 [ -x "${PROTON_BIN}" ] || { echo "Proton not found: ${PROTON_BIN}" >&2; exit 1; }
+[ -d "${COMPAT_DATA}/pfx" ] || { echo "Prefix not found: ${COMPAT_DATA}/pfx — run setup.sh first" >&2; exit 1; }
 
-# Singleton guard: atomic kernel file lock + process check to refuse second launch
+# Singleton guard
 LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/wuwa-tappo.lock"
 exec 200>"${LOCK_FILE}"
-if ! flock -n 200 || pgrep -f '[W]uwaTappo\.exe' >/dev/null 2>&1; then
-    echo "WuwaTappo is already running; not starting a second instance." >&2
+if ! flock -n 200; then
+    echo "WuwaTappo is already running." >&2
     exit 0
 fi
 
-# Assert 32-bit ARGB TrueColor visual ScreenDepth keys in Wine prefix
+# Ensure ScreenDepth=32 registry keys exist in this prefix
 assert_screendepth_registry() {
     local ureg="${COMPAT_DATA}/pfx/user.reg"
     [ -f "${ureg}" ] || return 0
-
     python3 - << 'EOF' "${ureg}"
-import os, re, sys
+import re, sys
 
 user_reg = sys.argv[1]
 with open(user_reg, 'r', encoding='utf-8', errors='replace') as f:
@@ -77,85 +85,45 @@ targets = [
     r"Software\\Wine\\AppDefaults\\msedgewebview2.exe\\X11 Driver",
 ]
 
-single_bs_targets = [
-    r"Software\Wine\AppDefaults\WuwaTappo.exe\X11 Driver",
-    r"Software\Wine\AppDefaults\msedgewebview2.exe\X11 Driver",
-]
-
-modified = False
-
-# 0. Remove ScreenDepth from the global [Software\\Wine\\X11 Driver] section if present.
-#    Setting it globally breaks other Wine apps in the same prefix (e.g. WuWa game).
-#    Only AppDefaults per-exe keys are safe.
+# Guard: never touch the global [Software\\Wine\\X11 Driver] key
 global_pat = r'(\[Software\\\\Wine\\\\X11 Driver\][^\[]*?)"ScreenDepth"="32"\r?\n'
 if re.search(global_pat, content):
     content = re.sub(global_pat, r'\1', content)
-    modified = True
 
-# 1. Clean up any malformed single-backslash versions
-for s_target in single_bs_targets:
-    esc_s = re.escape(s_target)
-    pat_s = rf"^\[{esc_s}\](?:[ \t]+\d+)?\r?\n(?:(?![\[]).*\r?\n)*"
-    if re.search(pat_s, content, flags=re.MULTILINE):
-        content = re.sub(pat_s, "", content, flags=re.MULTILINE)
-        modified = True
-
-# 2. Check each target and deduplicate
+modified = False
 for target in targets:
     esc = re.escape(target)
-    pat = rf"^\[{esc}\](?:[ \t]+\d+)?\r?\n(?:(?![\[]).*\r?\n)*"
+    pat = rf"^\[{esc}\](?:[ \t]+\d+)?\r?\n(?:(?!\[).*\r?\n)*"
     matches = list(re.finditer(pat, content, flags=re.MULTILINE))
-
     if not matches:
         if not content.endswith("\n"):
             content += "\n"
         content += f"\n[{target}]\n\"ScreenDepth\"=\"32\"\n"
         modified = True
     else:
-        first_m = matches[0]
-        first_block = first_m.group(0)
-
-        # Check if block already has exactly one ScreenDepth line and it equals "32"
-        sd_lines = re.findall(r'^\s*"ScreenDepth"\s*=.*$', first_block, flags=re.MULTILINE)
-        if len(sd_lines) == 1 and sd_lines[0].strip() == '"ScreenDepth"="32"':
-            new_block = first_block
-        else:
-            # Strip any existing ScreenDepth line(s)
-            cleaned = re.sub(r'^\s*"ScreenDepth"\s*=.*\r?\n?', '', first_block, flags=re.MULTILINE)
-            # Insert "ScreenDepth"="32"\n immediately after #time= line if present, else after header
-            time_m = re.search(r'^#time=[0-9a-fA-F]+\r?\n', cleaned, flags=re.MULTILINE)
-            pos = time_m.end() if time_m else (cleaned.find('\n') + 1)
-            new_block = cleaned[:pos] + '"ScreenDepth"="32"\n' + cleaned[pos:]
-            content = content[:first_m.start()] + new_block + content[first_m.end():]
+        block = matches[0].group(0)
+        if '"ScreenDepth"="32"' not in block:
+            new_block = block.rstrip('\n') + '\n"ScreenDepth"="32"\n\n'
+            content = content[:matches[0].start()] + new_block + content[matches[0].end():]
             modified = True
-            matches = list(re.finditer(pat, content, flags=re.MULTILINE))
-
-        # Deduplicate redundant section blocks if more than one exist
-        if len(matches) > 1:
-            for dup in reversed(matches[1:]):
-                content = content[:dup.start()] + content[dup.end():]
+        for dup in reversed(matches[1:]):
+            content = content[:dup.start()] + content[dup.end():]
             modified = True
 
 if modified:
-    content = content.rstrip() + "\n"
     with open(user_reg, 'w', encoding='utf-8') as f:
         f.write(content)
 EOF
 }
 assert_screendepth_registry
 
-# Reap leftovers from a previous crashed session of THIS app only. A global
-# 'pkill -f msedgewebview2.exe' would also kill the WebView2 children of a
-# concurrently running ok-wuwa (same Wine prefix pattern), so kill by our own
-# PID tree instead.
+# Reap only our own process tree from a previous crashed session
 reap_tree() {
     local root="$1"
     [ -n "${root}" ] || return 0
     local kids
     kids="$(pgrep -P "${root}" 2>/dev/null || true)"
-    for k in ${kids}; do
-        reap_tree "${k}"
-    done
+    for k in ${kids}; do reap_tree "${k}"; done
     kill "${root}" 2>/dev/null || true
 }
 
@@ -167,9 +135,7 @@ reap_sticky() {
             kill -0 "${STICKY_PID}" 2>/dev/null || break
             sleep 0.05
         done
-        if kill -0 "${STICKY_PID}" 2>/dev/null; then
-            kill -9 "${STICKY_PID}" 2>/dev/null || true
-        fi
+        kill -9 "${STICKY_PID}" 2>/dev/null || true
         wait "${STICKY_PID}" 2>/dev/null || true
         STICKY_PID=""
     fi
@@ -186,13 +152,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-[ -f "${FIX_LINUX}" ] || { echo "Missing ${FIX_LINUX}; run setup." >&2; exit 1; }
-[ -f "${SIDECAR_LINUX}" ] || { echo "Missing ${SIDECAR_LINUX}; run setup." >&2; exit 1; }
+[ -f "${FIX_LINUX}" ]    || { echo "Missing ${FIX_LINUX}; run setup.sh" >&2; exit 1; }
+[ -f "${SIDECAR_LINUX}" ] || { echo "Missing ${SIDECAR_LINUX}; run setup.sh" >&2; exit 1; }
 
-# Inner command: app and render-fix sidecar both in background; wait keeps
-# the container alive while the app runs. The sidecar must NOT be the
-# foreground process: when it exits (nudge ok -> exit 0) the foreground
-# context ends and the container is torn down, killing the app.
+# Inner script: app + nudge sidecars run concurrently; main process waits on app PID
 INNER="
     export WEBVIEW2_DEFAULT_BACKGROUND_COLOR='${WEBVIEW2_DEFAULT_BACKGROUND_COLOR}'
     export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='${WV2_FLAGS}'
@@ -227,7 +190,7 @@ if [ -n "${WUWA_WINEDEBUG:-}" ]; then
     FPK_ARGS+=(--env=WINEDEBUG="${WUWA_WINEDEBUG}")
 fi
 
-# Locate host-side sticky_daemon (prefer repo relative, fallback to prefix)
+# Host-side sticky daemon (prefer repo copy, fall back to prefix copy)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STICKY_DAEMON_BIN="${WUWA_STICKY_DAEMON:-}"
 if [ -z "${STICKY_DAEMON_BIN}" ]; then
@@ -238,12 +201,11 @@ if [ -z "${STICKY_DAEMON_BIN}" ]; then
     fi
 fi
 
-# Keep app windows on all virtual desktops (EWMH sticky) and sync XShape input
 python3 "${STICKY_DAEMON_BIN}" >/dev/null 2>>/tmp/wuwa_sticky_stderr.log &
 STICKY_PID=$!
 sleep 0.1
 if ! kill -0 "${STICKY_PID}" 2>/dev/null; then
-    echo "Warning: sticky_daemon failed to start (PID ${STICKY_PID}). Check /tmp/wuwa_sticky_stderr.log" >&2
+    echo "Warning: sticky_daemon failed to start. Check /tmp/wuwa_sticky_stderr.log" >&2
 fi
 
 setsid flatpak run \
