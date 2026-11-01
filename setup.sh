@@ -147,4 +147,17 @@ else:
 EOF
 fi
 
+# 9. Install native nudge_helper (17KB Win32 binary, resolves WineHQ Bug 59370 first-frame stall)
+WIN_DIR="${COMPAT_DATA}/pfx/drive_c/windows"
+if [ -d "${WIN_DIR}" ]; then
+    CC_BIN="$(which x86_64-w64-mingw32-gcc 2>/dev/null || true)"
+    [ -z "${CC_BIN}" ] && [ -x /home/linuxbrew/.linuxbrew/bin/x86_64-w64-mingw32-gcc ] && CC_BIN="/home/linuxbrew/.linuxbrew/bin/x86_64-w64-mingw32-gcc"
+    if [ -n "${CC_BIN}" ] && [ -f "${REPO_DIR}/sidecars/nudge_helper.c" ]; then
+        "${CC_BIN}" -O2 -mwindows -s "${REPO_DIR}/sidecars/nudge_helper.c" -o "${WIN_DIR}/nudge_helper.exe" 2>/dev/null || cp -f "${REPO_DIR}/sidecars/nudge_helper.exe" "${WIN_DIR}/nudge_helper.exe"
+    elif [ -f "${REPO_DIR}/sidecars/nudge_helper.exe" ]; then
+        cp -f "${REPO_DIR}/sidecars/nudge_helper.exe" "${WIN_DIR}/nudge_helper.exe"
+    fi
+    echo "installed: nudge_helper.exe in prefix drive_c/windows"
+fi
+
 echo "Setup complete. Run: wuwa-tappo"

@@ -126,6 +126,11 @@ if ! flock -n 200; then
     exit 0
 fi
 
+# Ensure nudge_helper.exe is present in prefix
+if [ -d "${COMPAT_DATA}/pfx/drive_c/windows" ] && [ ! -f "${COMPAT_DATA}/pfx/drive_c/windows/nudge_helper.exe" ]; then
+    [ -f "${SCRIPT_DIR}/sidecars/nudge_helper.exe" ] && cp -f "${SCRIPT_DIR}/sidecars/nudge_helper.exe" "${COMPAT_DATA}/pfx/drive_c/windows/nudge_helper.exe" 2>/dev/null || true
+fi
+
 # Ensure ScreenDepth=32 registry keys exist in this prefix
 assert_screendepth_registry() {
     local ureg="${COMPAT_DATA}/pfx/user.reg"
@@ -215,8 +220,12 @@ INNER="
     export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='${WV2_FLAGS}'
     export WEBVIEW2_BROWSER_EXECUTABLE_FOLDER='${WV2_DIR}'
 
+    \"${PROTON_BIN}\" runinprefix \"C:\\windows\\nudge_helper.exe\" &
+    NUDGE_PID=\$!
+
     \"${PROTON_BIN}\" runinprefix \"${APP_EXE_WIN}\"
     APP_EXIT=\$?
+    kill \${NUDGE_PID} 2>/dev/null || true
     exit \${APP_EXIT}
 "
 
