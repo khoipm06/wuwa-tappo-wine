@@ -18,6 +18,20 @@ static void add_seen(HWND h) {
     }
 }
 
+static BOOL CALLBACK EnumChildProc(HWND child, LPARAM lp) {
+    RECT cr;
+    if (GetWindowRect(child, &cr)) {
+        int cw = cr.right - cr.left;
+        int ch = cr.bottom - cr.top;
+        if (cw > 10 && ch > 10) {
+            SetWindowPos(child, NULL, 0, 0, cw - 2, ch - 2, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            Sleep(40);
+            SetWindowPos(child, NULL, 0, 0, cw, ch, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+    }
+    return TRUE;
+}
+
 static void nudge(HWND h) {
     RECT r;
     if (!GetWindowRect(h, &r)) return;
@@ -25,14 +39,22 @@ static void nudge(HWND h) {
     int h_px = r.bottom - r.top;
     if (w <= 0 || h_px <= 0) return;
 
-    // Use negative delta (-4px) so fullscreen/maximized windows (e.g. 2560x1600 pet overlay)
-    // are never clamped by Wine to display resolution bounds.
-    int nw = (w > 10) ? (w - 4) : (w + 4);
-    int nh = (h_px > 10) ? (h_px - 4) : (h_px + 4);
+    int sw = GetSystemMetrics(SM_CXSCREEN);
+    int sh = GetSystemMetrics(SM_CYSCREEN);
 
-    SetWindowPos(h, NULL, r.left, r.top, nw, nh, SWP_NOZORDER | SWP_NOACTIVATE);
-    Sleep(60);
-    SetWindowPos(h, NULL, r.left, r.top, w, h_px, SWP_NOZORDER | SWP_NOACTIVATE);
+    if (w >= sw && h_px >= sh) {
+        // Fullscreen overlay: do not resize top-level window (avoids Tauri monitor bounds crash).
+        // Nudge position with SWP_FRAMECHANGED and nudge child webview directly.
+        SetWindowPos(h, NULL, r.left + 1, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        Sleep(60);
+        SetWindowPos(h, NULL, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        EnumChildWindows(h, EnumChildProc, 0);
+    } else {
+        // Normal dialog window: resize delta (+4px) forces Chromium to allocate swapchain & present.
+        SetWindowPos(h, NULL, r.left, r.top, w + 4, h_px + 4, SWP_NOZORDER | SWP_NOACTIVATE);
+        Sleep(60);
+        SetWindowPos(h, NULL, r.left, r.top, w, h_px, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 }
 
 static BOOL CALLBACK EnumProc(HWND h, LPARAM lp) {

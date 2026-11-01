@@ -21,6 +21,8 @@
 #   WUWA_WV2_FLAGS=…   override Chromium flags
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Optional user config (export WUWA_COMPAT_DATA=... to relocate the prefix)
 [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/wuwa-tappo/env" ] && . "${XDG_CONFIG_HOME:-$HOME/.config}/wuwa-tappo/env"
 
@@ -110,7 +112,7 @@ fi
 # WebView2 Chromium flags: in-process GPU via DXVK swapchain, no DComp crash,
 # native occlusion disabled (forces immediate presentation without nudge),
 # checker-imaging and partial raster disabled (eliminates black/white tile glitch on drag).
-WV2_FLAGS='--no-sandbox --in-process-gpu --disable-direct-composition --disable-features=CalculateNativeWinOcclusion,DirectComposition,DirectCompositionLayers,WidgetLayering,RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy --disable-direct-composition-video-overlays --disable-checker-imaging --disable-partial-raster --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --enable-features=RunAllCompositorStagesBeforeDraw'
+WV2_FLAGS='--no-sandbox --in-process-gpu --disable-direct-composition --disable-features=CalculateNativeWinOcclusion,DirectComposition,DirectCompositionLayers,WidgetLayering,RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy --disable-direct-composition-video-overlays --disable-checker-imaging --disable-partial-raster --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --enable-features=RunAllCompositorStagesBeforeDraw --remote-debugging-port=9222'
 if [ -n "${WUWA_WV2_FLAGS:-}" ]; then WV2_FLAGS="${WUWA_WV2_FLAGS}"; fi
 
 export WEBVIEW2_DEFAULT_BACKGROUND_COLOR="${WEBVIEW2_DEFAULT_BACKGROUND_COLOR:-00000000}"
@@ -127,8 +129,8 @@ if ! flock -n 200; then
 fi
 
 # Ensure nudge_helper.exe is present in prefix
-if [ -d "${COMPAT_DATA}/pfx/drive_c/windows" ] && [ ! -f "${COMPAT_DATA}/pfx/drive_c/windows/nudge_helper.exe" ]; then
-    [ -f "${SCRIPT_DIR}/sidecars/nudge_helper.exe" ] && cp -f "${SCRIPT_DIR}/sidecars/nudge_helper.exe" "${COMPAT_DATA}/pfx/drive_c/windows/nudge_helper.exe" 2>/dev/null || true
+if [ -d "${COMPAT_DATA}/pfx/drive_c/windows" ] && [ -f "${SCRIPT_DIR}/sidecars/nudge_helper.exe" ]; then
+    cp -f "${SCRIPT_DIR}/sidecars/nudge_helper.exe" "${COMPAT_DATA}/pfx/drive_c/windows/nudge_helper.exe" 2>/dev/null || true
 fi
 
 # Ensure ScreenDepth=32 registry keys exist in this prefix
@@ -244,7 +246,6 @@ if [ -n "${WUWA_WINEDEBUG:-}" ]; then
 fi
 
 # Host-side sticky daemon (prefer repo copy, fall back to prefix copy)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STICKY_DAEMON_BIN="${WUWA_STICKY_DAEMON:-}"
 if [ -z "${STICKY_DAEMON_BIN}" ]; then
     if [ -f "${SCRIPT_DIR}/sidecars/sticky_daemon.py" ]; then

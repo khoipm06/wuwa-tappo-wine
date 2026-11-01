@@ -301,6 +301,7 @@ def scan_and_sync(
     display,
     root: int,
     atom_net_wm_desktop: int,
+    atom_net_wm_window_opacity: int,
     claimed_sticky: set,
     tracked_cat_windows: set,
     has_shape: bool,
@@ -352,6 +353,18 @@ def scan_and_sync(
 
         # Check for DesktopCatInput window
         if has_shape and (name == "DesktopCatInput" or name.startswith("DesktopCatInput")):
+            # Force 100% transparency in composite manager (eliminates solid white silhouette)
+            val_op = ctypes.c_ulong(0)
+            x11.XChangeProperty(
+                display,
+                w,
+                atom_net_wm_window_opacity,
+                CARDINAL,
+                32,
+                PropModeReplace,
+                ctypes.byref(val_op),
+                1,
+            )
             if w not in tracked_cat_windows:
                 xext.XShapeSelectInput(display, w, ShapeNotifyMask)
                 tracked_cat_windows.add(w)
@@ -399,6 +412,7 @@ def main(once: bool = False):
 
     root = x11.XDefaultRootWindow(d)
     atom_net_wm_desktop = x11.XInternAtom(d, b"_NET_WM_DESKTOP", 0)
+    atom_net_wm_window_opacity = x11.XInternAtom(d, b"_NET_WM_WINDOW_OPACITY", 0)
 
     # Query XShape Extension
     has_shape = False
@@ -428,6 +442,7 @@ def main(once: bool = False):
             d,
             root,
             atom_net_wm_desktop,
+            atom_net_wm_window_opacity,
             claimed_sticky,
             tracked_cat_windows,
             has_shape,
@@ -462,6 +477,7 @@ def main(once: bool = False):
                     d,
                     root,
                     atom_net_wm_desktop,
+                    atom_net_wm_window_opacity,
                     claimed_sticky,
                     tracked_cat_windows,
                     has_shape,
