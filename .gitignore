@@ -2,3 +2,7 @@
 *.log
 *.bak
 __pycache__/
+runtime/wine-runtime/
+runtime/*.pkg.tar.*
+sidecars/tappo_bridge
+sidecars/*.exe

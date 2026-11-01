@@ -1,273 +1,66 @@
 #!/usr/bin/env bash
-# WuWa Tappo — launches WuwaTappo.exe (Tauri/WebView2 desktop companion) via Proton
-# inside an isolated Wine prefix, separate from the Wuthering Waves game prefix.
-#
-# Fixes applied (see docs/root-cause.md):
-#   1. WebView2 Chromium flags     — prevents DComp/GPU crash inside the bwrap container
-#   2. SetWindowPos nudge sidecars — forces Chromium to present its first frame
-#   3. sticky_daemon               — EWMH _NET_WM_DESKTOP=0xFFFFFFFF overlay on all desktops
-#   4. ole32.dll patch             — prefix-local RevokeDragDrop→S_OK (WineHQ bug 60225)
-#
-# Layout defaults (all overridable via env):
-#   WUWA_COMPAT_DATA   Tappo compat dir              (~/.local/share/tappo-prefix)
-#   WUWA_STEAM_CLIENT  Flatpak Steam data root        (~/.var/app/…/Steam)
-#   WUWA_ENTRY_POINT   SteamLinuxRuntime _v2-entry    (auto-detected)
-#   WUWA_PROTON        Proton runner binary            (DW-Proton Latest)
-#   WUWA_WV2_DIR       WebView2 runtime Windows path  (auto-detected from registry)
-#   WUWA_APP_EXE_WIN   WuwaTappo.exe Windows path     (C:\Program Files\…)
-#
-# Diagnostics:
-#   WUWA_DIAG=1        enable WINEDEBUG=+err,+seh
-#   WUWA_WV2_FLAGS=…   override Chromium flags
+# Universal launcher for Wuwa Tappo on Linux.
+# Runs in an isolated prefix with patched Wine runtime, 4KB PE memory alignment, and C sidecar.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNTIME_DIR="${SCRIPT_DIR}/runtime/wine-runtime"
 
-# Optional user config (export WUWA_COMPAT_DATA=... to relocate the prefix)
-[ -f "${XDG_CONFIG_HOME:-$HOME/.config}/wuwa-tappo/env" ] && . "${XDG_CONFIG_HOME:-$HOME/.config}/wuwa-tappo/env"
+# 1. Determine prefix location
+DEFAULT_PFX="/var/mnt/LData/tappo-prefix/pfx"
+if [ ! -d "${DEFAULT_PFX}" ]; then
+    DEFAULT_PFX="${HOME}/.local/share/wuwa-tappo/prefix"
+fi
+TAPPO_PREFIX="${WUWA_PREFIX:-${DEFAULT_PFX}}"
 
-APP_EXE_WIN="${WUWA_APP_EXE_WIN:-C:\\Program Files\\WuwaTappoGlobal\\WuwaTappo.exe}"
-if [ -z "${WUWA_STEAM_CLIENT:-}" ]; then
-    if [ -d "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam" ]; then
-        STEAM_CLIENT="$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
-    elif [ -d "$HOME/.local/share/Steam" ]; then
-        STEAM_CLIENT="$HOME/.local/share/Steam"
-    elif [ -d "$HOME/.steam/steam" ]; then
-        STEAM_CLIENT="$HOME/.steam/steam"
-    elif [ -d "$HOME/.steam/root" ]; then
-        STEAM_CLIENT="$HOME/.steam/root"
-    else
-        STEAM_CLIENT="$HOME/.local/share/Steam"
-    fi
-else
-    STEAM_CLIENT="${WUWA_STEAM_CLIENT}"
+# 2. Check Wine runtime
+if [ ! -f "${RUNTIME_DIR}/.patched" ]; then
+    echo "[wuwa-tappo] Runtime not found or incomplete. Running setup.sh..."
+    "${SCRIPT_DIR}/setup.sh"
 fi
 
-DEFAULT_PFX="$HOME/.var/app/com.valvesoftware.Steam/.local/share/tappo-prefix"
-[ -d "$HOME/.var/app/com.valvesoftware.Steam" ] || DEFAULT_PFX="$HOME/.local/share/tappo-prefix"
-COMPAT_DATA="${WUWA_COMPAT_DATA:-${DEFAULT_PFX}}"
+WINE="${RUNTIME_DIR}/bin/wine"
+WINESERVER="${RUNTIME_DIR}/bin/wineserver"
+APP_EXE_WIN="C:\\Program Files\\WuwaTappoGlobal\\WuwaTappo.exe"
+APP_EXE_UNIX="${TAPPO_PREFIX}/drive_c/Program Files/WuwaTappoGlobal/WuwaTappo.exe"
 
-if [ -z "${WUWA_ENTRY_POINT:-}" ]; then
-    ENTRY_POINT="$(python3 - << 'EOF' "${STEAM_CLIENT}"
-import glob, os, re, sys
-steam_client = sys.argv[1]
-candidates = []
-lib_dirs = [steam_client]
-for vdf in (
-    os.path.join(steam_client, "steamapps", "libraryfolders.vdf"),
-    os.path.join(steam_client, "config", "libraryfolders.vdf"),
-    os.path.expanduser("~/.steam/steam/steamapps/libraryfolders.vdf"),
-    os.path.expanduser("~/.local/share/Steam/steamapps/libraryfolders.vdf"),
-):
-    if os.path.isfile(vdf):
-        try:
-            with open(vdf, "r", encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    m = re.search(r'"path"\s+"([^"]+)"', line)
-                    if m and os.path.isdir(m.group(1)):
-                        lib_dirs.append(m.group(1))
-        except Exception:
-            pass
-
-for pattern in ("/mnt/*", "/media/*", "/run/media/*/*", "/run/media/*", "/var/mnt/*"):
-    for p in glob.glob(pattern):
-        if os.path.isdir(p):
-            lib_dirs.append(p)
-            lib_dirs.append(os.path.join(p, "SteamLibrary"))
-
-seen = set()
-for lib in lib_dirs:
-    if lib in seen:
-        continue
-    seen.add(lib)
-    for ep in glob.glob(os.path.join(lib, "steamapps", "common", "SteamLinuxRuntime*", "_v2-entry-point")):
-        if os.access(ep, os.X_OK):
-            candidates.append(ep)
-
-candidates.sort()
-if candidates:
-    print(candidates[-1])
-EOF
-)"
-else
-    ENTRY_POINT="${WUWA_ENTRY_POINT}"
+if [ ! -f "${APP_EXE_UNIX}" ]; then
+    echo "[wuwa-tappo] WuwaTappo.exe not found at ${APP_EXE_UNIX}" >&2
+    echo "Please ensure the app is installed in the prefix." >&2
+    exit 1
 fi
 
-if [ -z "${WUWA_PROTON:-}" ]; then
-    if [ -x "${STEAM_CLIENT}/compatibilitytools.d/DW-Proton Latest/proton" ]; then
-        PROTON_BIN="${STEAM_CLIENT}/compatibilitytools.d/DW-Proton Latest/proton"
-    else
-        PROTON_BIN="$(find "${STEAM_CLIENT}/compatibilitytools.d" -maxdepth 2 -name proton -type f 2>/dev/null | sort | tail -1)"
-    fi
-else
-    PROTON_BIN="${WUWA_PROTON}"
+# 3. Environment configuration
+export WINEPREFIX="${TAPPO_PREFIX}"
+export WINEDEBUG=-all
+export __NV_X11_DISABLE_EXPLICIT_SYNC=1
+export GLIBC_TUNABLES="glibc.malloc.arena_max=2"
+export MALLOC_CONF="thp:never"
+export WEBVIEW2_DEFAULT_BACKGROUND_COLOR=00000000
+export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--no-sandbox --in-process-gpu --disable-features=CalculateNativeWinOcclusion,DirectComposition,DirectCompositionLayers,WidgetLayering,RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy --disable-direct-composition-video-overlays --disable-checker-imaging --disable-partial-raster --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --enable-features=RunAllCompositorStagesBeforeDraw"
+
+# 4. Realign PE if updated
+python3 "${SCRIPT_DIR}/patches/align_pe.py" "${TAPPO_PREFIX}" >/dev/null 2>&1 || true
+
+# 5. Clean up stale wineserver if dead
+"${WINESERVER}" -k >/dev/null 2>&1 || true
+
+# 6. Start C input bridge pipeline in background
+BRIDGE_PID=""
+if [ -x "${SCRIPT_DIR}/sidecars/tappo_bridge" ] && [ -f "${SCRIPT_DIR}/sidecars/tappo_helper.exe" ]; then
+    "${SCRIPT_DIR}/sidecars/tappo_bridge" | "${WINE}" "${SCRIPT_DIR}/sidecars/tappo_helper.exe" &
+    BRIDGE_PID=$!
 fi
-# Auto-detect WebView2 version installed in this prefix
-if [ -z "${WUWA_WV2_DIR:-}" ]; then
-    _wv2_ver="$(ls "${COMPAT_DATA}/pfx/drive_c/Program Files (x86)/Microsoft/EdgeWebView/Application/" 2>/dev/null | grep -E '^[0-9]+\.' | sort -V | tail -1)"
-    WV2_DIR="C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\${_wv2_ver:-156.0.4314.50}"
-else
-    WV2_DIR="${WUWA_WV2_DIR}"
-fi
-# WebView2 Chromium flags: in-process GPU via DXVK swapchain, no DComp crash,
-# native occlusion disabled (forces immediate presentation without nudge),
-# checker-imaging and partial raster disabled (eliminates black/white tile glitch on drag).
-WV2_FLAGS='--no-sandbox --in-process-gpu --disable-direct-composition --disable-features=CalculateNativeWinOcclusion,DirectComposition,DirectCompositionLayers,WidgetLayering,RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy --disable-direct-composition-video-overlays --disable-checker-imaging --disable-partial-raster --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --enable-features=RunAllCompositorStagesBeforeDraw --remote-debugging-port=9222'
-if [ -n "${WUWA_WV2_FLAGS:-}" ]; then WV2_FLAGS="${WUWA_WV2_FLAGS}"; fi
-
-export WEBVIEW2_DEFAULT_BACKGROUND_COLOR="${WEBVIEW2_DEFAULT_BACKGROUND_COLOR:-00000000}"
-
-[ -x "${PROTON_BIN}" ] || { echo "Proton not found: ${PROTON_BIN}" >&2; exit 1; }
-[ -d "${COMPAT_DATA}/pfx" ] || { echo "Prefix not found: ${COMPAT_DATA}/pfx — run setup.sh first" >&2; exit 1; }
-
-# Singleton guard
-LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/wuwa-tappo.lock"
-exec 200>"${LOCK_FILE}"
-if ! flock -n 200; then
-    echo "WuwaTappo is already running." >&2
-    exit 0
-fi
-
-# Ensure nudge_helper.exe is present in prefix
-if [ -d "${COMPAT_DATA}/pfx/drive_c/windows" ] && [ -f "${SCRIPT_DIR}/sidecars/nudge_helper.exe" ]; then
-    cp -f "${SCRIPT_DIR}/sidecars/nudge_helper.exe" "${COMPAT_DATA}/pfx/drive_c/windows/nudge_helper.exe" 2>/dev/null || true
-fi
-
-# Ensure ScreenDepth=32 registry keys exist in this prefix
-assert_screendepth_registry() {
-    local ureg="${COMPAT_DATA}/pfx/user.reg"
-    [ -f "${ureg}" ] || return 0
-    python3 - << 'EOF' "${ureg}"
-import re, sys
-
-user_reg = sys.argv[1]
-with open(user_reg, 'r', encoding='utf-8', errors='replace') as f:
-    content = f.read()
-
-targets = [
-    r"Software\\Wine\\AppDefaults\\WuwaTappo.exe\\X11 Driver",
-    r"Software\\Wine\\AppDefaults\\msedgewebview2.exe\\X11 Driver",
-]
-
-# Guard: never touch the global [Software\\Wine\\X11 Driver] key
-global_pat = r'(\[Software\\\\Wine\\\\X11 Driver\][^\[]*?)"ScreenDepth"="32"\r?\n'
-if re.search(global_pat, content):
-    content = re.sub(global_pat, r'\1', content)
-
-modified = False
-for target in targets:
-    esc = re.escape(target)
-    pat = rf"^\[{esc}\](?:[ \t]+\d+)?\r?\n(?:(?!\[).*\r?\n)*"
-    matches = list(re.finditer(pat, content, flags=re.MULTILINE))
-    if not matches:
-        if not content.endswith("\n"):
-            content += "\n"
-        content += f"\n[{target}]\n\"ScreenDepth\"=\"32\"\n"
-        modified = True
-    else:
-        block = matches[0].group(0)
-        if '"ScreenDepth"="32"' not in block:
-            new_block = block.rstrip('\n') + '\n"ScreenDepth"="32"\n\n'
-            content = content[:matches[0].start()] + new_block + content[matches[0].end():]
-            modified = True
-        for dup in reversed(matches[1:]):
-            content = content[:dup.start()] + content[dup.end():]
-            modified = True
-
-if modified:
-    with open(user_reg, 'w', encoding='utf-8') as f:
-        f.write(content)
-EOF
-}
-assert_screendepth_registry
-
-# Reap only our own process tree from a previous crashed session
-reap_tree() {
-    local root="$1"
-    [ -n "${root}" ] || return 0
-    local kids
-    kids="$(pgrep -P "${root}" 2>/dev/null || true)"
-    for k in ${kids}; do reap_tree "${k}"; done
-    kill "${root}" 2>/dev/null || true
-}
-
-STICKY_PID=""
-reap_sticky() {
-    if [ -n "${STICKY_PID:-}" ] && kill -0 "${STICKY_PID}" 2>/dev/null; then
-        kill -TERM "${STICKY_PID}" 2>/dev/null || true
-        for _ in 1 2 3 4 5; do
-            kill -0 "${STICKY_PID}" 2>/dev/null || break
-            sleep 0.05
-        done
-        kill -9 "${STICKY_PID}" 2>/dev/null || true
-        wait "${STICKY_PID}" 2>/dev/null || true
-        STICKY_PID=""
-    fi
-}
 
 cleanup() {
-    reap_sticky
-    if [ -n "${APP_PID:-}" ] && kill -0 "${APP_PID}" 2>/dev/null; then
-        reap_tree "${APP_PID}"
+    echo "[wuwa-tappo] Shutting down..."
+    if [ -n "${BRIDGE_PID}" ]; then
+        kill -TERM "${BRIDGE_PID}" 2>/dev/null || true
     fi
-    if [ -n "${PGID:-}" ] && [ "${PGID}" != "0" ]; then
-        kill -- "-${PGID}" 2>/dev/null || true
-    fi
+    "${WINESERVER}" -k 2>/dev/null || true
 }
-trap cleanup EXIT INT TERM HUP
+trap cleanup EXIT INT TERM
 
-# Inner script: app runs directly via Proton
-INNER="
-    export WEBVIEW2_DEFAULT_BACKGROUND_COLOR='${WEBVIEW2_DEFAULT_BACKGROUND_COLOR}'
-    export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='${WV2_FLAGS}'
-    export WEBVIEW2_BROWSER_EXECUTABLE_FOLDER='${WV2_DIR}'
-
-    \"${PROTON_BIN}\" runinprefix \"C:\\windows\\nudge_helper.exe\" &
-    NUDGE_PID=\$!
-
-    \"${PROTON_BIN}\" runinprefix \"${APP_EXE_WIN}\"
-    APP_EXIT=\$?
-    kill \${NUDGE_PID} 2>/dev/null || true
-    exit \${APP_EXIT}
-"
-
-FPK_ARGS=(
-    --env=STEAM_COMPAT_CLIENT_INSTALL_PATH="${STEAM_CLIENT}"
-    --env=STEAM_COMPAT_DATA_PATH="${COMPAT_DATA}"
-    --env=WEBVIEW2_DEFAULT_BACKGROUND_COLOR="${WEBVIEW2_DEFAULT_BACKGROUND_COLOR}"
-    --env=WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="${WV2_FLAGS}"
-    --env=WEBVIEW2_BROWSER_EXECUTABLE_FOLDER="${WV2_DIR}"
-)
-if [ "${WUWA_DIAG:-0}" = "1" ]; then
-    FPK_ARGS+=(--env=WINEDEBUG='+err,+seh')
-fi
-if [ -n "${WUWA_WINEDEBUG:-}" ]; then
-    FPK_ARGS+=(--env=WINEDEBUG="${WUWA_WINEDEBUG}")
-fi
-
-# Host-side sticky daemon (prefer repo copy, fall back to prefix copy)
-STICKY_DAEMON_BIN="${WUWA_STICKY_DAEMON:-}"
-if [ -z "${STICKY_DAEMON_BIN}" ]; then
-    if [ -f "${SCRIPT_DIR}/sidecars/sticky_daemon.py" ]; then
-        STICKY_DAEMON_BIN="${SCRIPT_DIR}/sidecars/sticky_daemon.py"
-    else
-        STICKY_DAEMON_BIN="${COMPAT_DATA}/pfx/sticky_daemon.py"
-    fi
-fi
-
-python3 "${STICKY_DAEMON_BIN}" >/dev/null 2>>/tmp/wuwa_sticky_stderr.log &
-STICKY_PID=$!
-sleep 0.1
-if ! kill -0 "${STICKY_PID}" 2>/dev/null; then
-    echo "Warning: sticky_daemon failed to start. Check /tmp/wuwa_sticky_stderr.log" >&2
-fi
-
-setsid flatpak run \
-    "${FPK_ARGS[@]}" \
-    --command="${ENTRY_POINT}" \
-    com.valvesoftware.Steam \
-    --verb=runinprefix -- bash -c "${INNER}" &
-APP_PID=$!
-PGID="$(ps -o pgid= -p "${APP_PID}" 2>/dev/null | tr -d ' ')"
-
-wait "${APP_PID}" 2>/dev/null || true
+# 7. Launch Wuwa Tappo
+echo "[wuwa-tappo] Starting Wuwa Tappo..."
+"${WINE}" "${APP_EXE_WIN}" "$@" || true

@@ -1,5 +1,8 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define MAX_SEEN 128
 static HWND seen_hwnds[MAX_SEEN];
@@ -43,14 +46,13 @@ static void nudge(HWND h) {
     int sh = GetSystemMetrics(SM_CYSCREEN);
 
     if (w >= sw && h_px >= sh) {
-        // Fullscreen overlay: do not resize top-level window (avoids Tauri monitor bounds crash).
-        // Nudge position with SWP_FRAMECHANGED and nudge child webview directly.
+        // Fullscreen overlay: nudge child webviews directly without resizing top-level
         SetWindowPos(h, NULL, r.left + 1, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         Sleep(60);
         SetWindowPos(h, NULL, r.left, r.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         EnumChildWindows(h, EnumChildProc, 0);
     } else {
-        // Normal dialog window: resize delta (+4px) forces Chromium to allocate swapchain & present.
+        // Dialog windows: micro delta to trigger initial swapchain present
         SetWindowPos(h, NULL, r.left, r.top, w + 4, h_px + 4, SWP_NOZORDER | SWP_NOACTIVATE);
         Sleep(60);
         SetWindowPos(h, NULL, r.left, r.top, w, h_px, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -71,26 +73,51 @@ static BOOL CALLBACK EnumProc(HWND h, LPARAM lp) {
     return TRUE;
 }
 
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow) {
-    int empty_cycles = 0;
-    int has_seen_any = 0;
-
+static DWORD WINAPI NudgeThread(LPVOID lpParam) {
     while (1) {
         EnumWindows(EnumProc, 0);
-
-        if (seen_count > 0) has_seen_any = 1;
-
-        if (has_seen_any) {
-            HWND any = FindWindowA("Tauri Window", NULL);
-            if (!any) {
-                empty_cycles++;
-                if (empty_cycles >= 10) break;
-            } else {
-                empty_cycles = 0;
-            }
-        }
-
         Sleep(500);
+    }
+    return 0;
+}
+
+static void send_key(WORD vk, WORD scan, BOOL extended, BOOL down) {
+    INPUT input = {0};
+    if (!vk) vk = (WORD)MapVirtualKeyW(scan | (extended ? 0xe000 : 0), MAPVK_VSC_TO_VK_EX);
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.wScan = scan;
+    input.ki.dwFlags = (extended ? KEYEVENTF_EXTENDEDKEY : 0) | (down ? 0 : KEYEVENTF_KEYUP);
+    input.ki.time = GetTickCount();
+    SendInput(1, &input, sizeof(input));
+}
+
+static void move_cursor(int root_x, int root_y) {
+    int x = root_x + GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int y = root_y + GetSystemMetrics(SM_YVIRTUALSCREEN);
+    SetCursorPos(x, y);
+}
+
+int main(int argc, char **argv) {
+    // High-DPI awareness for accurate coordinate matching
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    // Launch background window watcher / nudge thread
+    HANDLE hThread = CreateThread(NULL, 0, NudgeThread, NULL, 0, NULL);
+    if (hThread) CloseHandle(hThread);
+
+    // Read commands from stdin (piped from Linux host bridge)
+    char line[128];
+    while (fgets(line, sizeof(line), stdin)) {
+        unsigned int vk, scan, extended, down;
+        int x, y;
+        if (sscanf(line, "key %x %x %u %u", &vk, &scan, &extended, &down) == 4) {
+            send_key((WORD)vk, (WORD)scan, extended != 0, down != 0);
+        } else if (sscanf(line, "move %d %d", &x, &y) == 2) {
+            move_cursor(x, y);
+        } else if (strncmp(line, "exit", 4) == 0) {
+            break;
+        }
     }
     return 0;
 }
