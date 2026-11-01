@@ -29,17 +29,17 @@
 set -euo pipefail
 
 APP_ID="3513350"
-APP_EXE_WIN="${WUWA_APP_EXE_WIN:-'C:\\Program Files\\WuwaTappoGlobal\\WuwaTappo.exe'}"
+APP_EXE_WIN="${WUWA_APP_EXE_WIN:-C:\\Program Files\\WuwaTappoGlobal\\WuwaTappo.exe}"
 STEAM_CLIENT="${WUWA_STEAM_CLIENT:-$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam}"
 COMPAT_DATA="${WUWA_COMPAT_DATA:-/var/mnt/LData/SteamLibrary/steamapps/compatdata/${APP_ID}}"
 ENTRY_POINT="${WUWA_ENTRY_POINT:-/var/mnt/LData/SteamLibrary/steamapps/common/SteamLinuxRuntime_4/_v2-entry-point}"
 PROTON_BIN="${WUWA_PROTON:-${STEAM_CLIENT}/compatibilitytools.d/DW-Proton Latest/proton}"
-WV2_DIR="${WUWA_WV2_DIR:-'C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\156.0.4314.50'}"
-PYTHON_WIN="${WUWA_PYTHON_WIN:-'C:\\users\\steamuser\\AppData\\Local\\ok-ww\\data\\apps\\ok-ww\\python\\python.exe'}"
+WV2_DIR="${WUWA_WV2_DIR:-C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\156.0.4314.50}"
+PYTHON_WIN="${WUWA_PYTHON_WIN:-C:\\users\\steamuser\\AppData\\Local\\ok-ww\\data\\apps\\ok-ww\\python\\python.exe}"
 FIX_LINUX="${COMPAT_DATA}/pfx/webview2_render_fix.py"
 SIDECAR_LINUX="${COMPAT_DATA}/pfx/tappo_sidecar.py"
 # The prefix's z: drive maps to / , so /host/path -> Z:\host\path
-winpath() { printf 'Z:%s' "${1//\//\\}"; }
+winpath() { printf 'Z:%s' "${1//\//\\\\}"; }
 FIX_WIN="$(winpath "${COMPAT_DATA}/pfx/webview2_render_fix.py")"
 SIDECAR_WIN="$(winpath "${COMPAT_DATA}/pfx/tappo_sidecar.py")"
 
@@ -48,13 +48,101 @@ SIDECAR_WIN="$(winpath "${COMPAT_DATA}/pfx/tappo_sidecar.py")"
 WV2_FLAGS='--no-sandbox --disable-gpu --disable-gpu-compositing --disable-gpu-rasterization --in-process-gpu --disable-features=RendererCodeIntegrity,TouchEvents,TouchSelectionStrategy,DWriteFontProxy,DirectComposition,DirectCompositionLayers,WidgetLayering --disable-direct-composition-video-overlays --disable-accelerated-2d-canvas --disable-accelerated-video-decode'
 if [ -n "${WUWA_WV2_FLAGS:-}" ]; then WV2_FLAGS="${WUWA_WV2_FLAGS}"; fi
 
+export WEBVIEW2_DEFAULT_BACKGROUND_COLOR="${WEBVIEW2_DEFAULT_BACKGROUND_COLOR:-00000000}"
+
 [ -x "${PROTON_BIN}" ] || { echo "Proton not found: ${PROTON_BIN}" >&2; exit 1; }
 
-# Singleton guard: refuse a second launch (duplicate taskbar windows).
-if pgrep -f '[W]uwaTappo\.exe' >/dev/null 2>&1; then
+# Singleton guard: atomic kernel file lock + process check to refuse second launch
+LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/wuwa-tappo.lock"
+exec 200>"${LOCK_FILE}"
+if ! flock -n 200 || pgrep -f '[W]uwaTappo\.exe' >/dev/null 2>&1; then
     echo "WuwaTappo is already running; not starting a second instance." >&2
     exit 0
 fi
+
+# Assert 32-bit ARGB TrueColor visual ScreenDepth keys in Wine prefix
+assert_screendepth_registry() {
+    local ureg="${COMPAT_DATA}/pfx/user.reg"
+    [ -f "${ureg}" ] || return 0
+
+    python3 - << 'EOF' "${ureg}"
+import os, re, sys
+
+user_reg = sys.argv[1]
+with open(user_reg, 'r', encoding='utf-8', errors='replace') as f:
+    content = f.read()
+
+targets = [
+    r"Software\\Wine\\AppDefaults\\WuwaTappo.exe\\X11 Driver",
+    r"Software\\Wine\\AppDefaults\\msedgewebview2.exe\\X11 Driver",
+]
+
+single_bs_targets = [
+    r"Software\Wine\AppDefaults\WuwaTappo.exe\X11 Driver",
+    r"Software\Wine\AppDefaults\msedgewebview2.exe\X11 Driver",
+]
+
+modified = False
+
+# 0. Remove ScreenDepth from the global [Software\\Wine\\X11 Driver] section if present.
+#    Setting it globally breaks other Wine apps in the same prefix (e.g. WuWa game).
+#    Only AppDefaults per-exe keys are safe.
+global_pat = r'(\[Software\\\\Wine\\\\X11 Driver\][^\[]*?)"ScreenDepth"="32"\r?\n'
+if re.search(global_pat, content):
+    content = re.sub(global_pat, r'\1', content)
+    modified = True
+
+# 1. Clean up any malformed single-backslash versions
+for s_target in single_bs_targets:
+    esc_s = re.escape(s_target)
+    pat_s = rf"^\[{esc_s}\](?:[ \t]+\d+)?\r?\n(?:(?![\[]).*\r?\n)*"
+    if re.search(pat_s, content, flags=re.MULTILINE):
+        content = re.sub(pat_s, "", content, flags=re.MULTILINE)
+        modified = True
+
+# 2. Check each target and deduplicate
+for target in targets:
+    esc = re.escape(target)
+    pat = rf"^\[{esc}\](?:[ \t]+\d+)?\r?\n(?:(?![\[]).*\r?\n)*"
+    matches = list(re.finditer(pat, content, flags=re.MULTILINE))
+
+    if not matches:
+        if not content.endswith("\n"):
+            content += "\n"
+        content += f"\n[{target}]\n\"ScreenDepth\"=\"32\"\n"
+        modified = True
+    else:
+        first_m = matches[0]
+        first_block = first_m.group(0)
+
+        # Check if block already has exactly one ScreenDepth line and it equals "32"
+        sd_lines = re.findall(r'^\s*"ScreenDepth"\s*=.*$', first_block, flags=re.MULTILINE)
+        if len(sd_lines) == 1 and sd_lines[0].strip() == '"ScreenDepth"="32"':
+            new_block = first_block
+        else:
+            # Strip any existing ScreenDepth line(s)
+            cleaned = re.sub(r'^\s*"ScreenDepth"\s*=.*\r?\n?', '', first_block, flags=re.MULTILINE)
+            # Insert "ScreenDepth"="32"\n immediately after #time= line if present, else after header
+            time_m = re.search(r'^#time=[0-9a-fA-F]+\r?\n', cleaned, flags=re.MULTILINE)
+            pos = time_m.end() if time_m else (cleaned.find('\n') + 1)
+            new_block = cleaned[:pos] + '"ScreenDepth"="32"\n' + cleaned[pos:]
+            content = content[:first_m.start()] + new_block + content[first_m.end():]
+            modified = True
+            matches = list(re.finditer(pat, content, flags=re.MULTILINE))
+
+        # Deduplicate redundant section blocks if more than one exist
+        if len(matches) > 1:
+            for dup in reversed(matches[1:]):
+                content = content[:dup.start()] + content[dup.end():]
+            modified = True
+
+if modified:
+    content = content.rstrip() + "\n"
+    with open(user_reg, 'w', encoding='utf-8') as f:
+        f.write(content)
+EOF
+}
+assert_screendepth_registry
 
 # Reap leftovers from a previous crashed session of THIS app only. A global
 # 'pkill -f msedgewebview2.exe' would also kill the WebView2 children of a
@@ -71,6 +159,22 @@ reap_tree() {
     kill "${root}" 2>/dev/null || true
 }
 
+STICKY_PID=""
+reap_sticky() {
+    if [ -n "${STICKY_PID:-}" ] && kill -0 "${STICKY_PID}" 2>/dev/null; then
+        kill -TERM "${STICKY_PID}" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+            kill -0 "${STICKY_PID}" 2>/dev/null || break
+            sleep 0.05
+        done
+        if kill -0 "${STICKY_PID}" 2>/dev/null; then
+            kill -9 "${STICKY_PID}" 2>/dev/null || true
+        fi
+        wait "${STICKY_PID}" 2>/dev/null || true
+        STICKY_PID=""
+    fi
+}
+
 cleanup() {
     reap_sticky
     if [ -n "${APP_PID:-}" ] && kill -0 "${APP_PID}" 2>/dev/null; then
@@ -80,7 +184,7 @@ cleanup() {
         kill -- "-${PGID}" 2>/dev/null || true
     fi
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM HUP
 
 [ -f "${FIX_LINUX}" ] || { echo "Missing ${FIX_LINUX}; run setup." >&2; exit 1; }
 [ -f "${SIDECAR_LINUX}" ] || { echo "Missing ${SIDECAR_LINUX}; run setup." >&2; exit 1; }
@@ -90,15 +194,29 @@ trap cleanup EXIT
 # foreground process: when it exits (nudge ok -> exit 0) the foreground
 # context ends and the container is torn down, killing the app.
 INNER="
-    '${PROTON_BIN}' runinprefix '${APP_EXE_WIN}' &
-    '${PROTON_BIN}' runinprefix '${PYTHON_WIN}' '${SIDECAR_WIN}' &
-    '${PROTON_BIN}' runinprefix '${PYTHON_WIN}' '${FIX_WIN}' &
-    wait
+    export WEBVIEW2_DEFAULT_BACKGROUND_COLOR='${WEBVIEW2_DEFAULT_BACKGROUND_COLOR}'
+    export WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='${WV2_FLAGS}'
+    export WEBVIEW2_BROWSER_EXECUTABLE_FOLDER='${WV2_DIR}'
+
+    \"${PROTON_BIN}\" runinprefix \"${APP_EXE_WIN}\" &
+    MAIN_PID=\$!
+    \"${PROTON_BIN}\" runinprefix \"${PYTHON_WIN}\" \"${SIDECAR_WIN}\" &
+    SIDECAR_PID=\$!
+    \"${PROTON_BIN}\" runinprefix \"${PYTHON_WIN}\" \"${FIX_WIN}\" &
+    FIX_PID=\$!
+
+    wait \"\${MAIN_PID}\"
+    APP_EXIT=\$?
+
+    kill \"\${SIDECAR_PID}\" \"\${FIX_PID}\" 2>/dev/null || true
+    wait 2>/dev/null || true
+    exit \${APP_EXIT}
 "
 
 FPK_ARGS=(
     --env=STEAM_COMPAT_CLIENT_INSTALL_PATH="${STEAM_CLIENT}"
     --env=STEAM_COMPAT_DATA_PATH="${COMPAT_DATA}"
+    --env=WEBVIEW2_DEFAULT_BACKGROUND_COLOR="${WEBVIEW2_DEFAULT_BACKGROUND_COLOR}"
     --env=WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="${WV2_FLAGS}"
     --env=WEBVIEW2_BROWSER_EXECUTABLE_FOLDER="${WV2_DIR}"
 )
@@ -109,11 +227,24 @@ if [ -n "${WUWA_WINEDEBUG:-}" ]; then
     FPK_ARGS+=(--env=WINEDEBUG="${WUWA_WINEDEBUG}")
 fi
 
-# Keep app windows on all virtual desktops (EWMH sticky): pet overlay follows
-# every desktop, and host-side screenshots see the true window contents.
-python3 "${COMPAT_DATA}/pfx/sticky_daemon.py" >/dev/null 2>&1 &
+# Locate host-side sticky_daemon (prefer repo relative, fallback to prefix)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+STICKY_DAEMON_BIN="${WUWA_STICKY_DAEMON:-}"
+if [ -z "${STICKY_DAEMON_BIN}" ]; then
+    if [ -f "${SCRIPT_DIR}/sidecars/sticky_daemon.py" ]; then
+        STICKY_DAEMON_BIN="${SCRIPT_DIR}/sidecars/sticky_daemon.py"
+    else
+        STICKY_DAEMON_BIN="${COMPAT_DATA}/pfx/sticky_daemon.py"
+    fi
+fi
+
+# Keep app windows on all virtual desktops (EWMH sticky) and sync XShape input
+python3 "${STICKY_DAEMON_BIN}" >/dev/null 2>>/tmp/wuwa_sticky_stderr.log &
 STICKY_PID=$!
-reap_sticky() { kill "${STICKY_PID}" 2>/dev/null || true; }
+sleep 0.1
+if ! kill -0 "${STICKY_PID}" 2>/dev/null; then
+    echo "Warning: sticky_daemon failed to start (PID ${STICKY_PID}). Check /tmp/wuwa_sticky_stderr.log" >&2
+fi
 
 setsid flatpak run \
     "${FPK_ARGS[@]}" \

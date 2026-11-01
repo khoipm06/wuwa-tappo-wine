@@ -6,6 +6,9 @@ function sticky(w) {
     if (!w.onAllDesktops) w.onAllDesktops = true;
     w.noBorder = true;
     w.keepAbove = true;
+    // Prevent KWin from treating Wine TOPMOST overlay as a fullscreen window,
+    // which would hide it when another window is focused.
+    if (w.fullScreen) w.fullScreen = false;
 }
 workspace.windowList().forEach(sticky);
 workspace.windowAdded.connect(sticky);
